@@ -29,7 +29,6 @@ def get_enum_info():
 
             def visit_enum_member(self, cid, value):
                 members.append({
-                    'id': cid,
                     'value': value,
                     'name': ida_enum.get_enum_member_name(cid),
                 })
@@ -37,11 +36,12 @@ def get_enum_info():
 
         ida_enum.for_all_enum_members(enum_id, V())
 
+        print(ida_enum.get_enum_name(enum_id), ida_enum.get_enum_flag(enum_id))
         ret.append({
-            'id': enum_id,
             'idx': ida_enum.get_enum_idx(enum_id),
             'name': ida_enum.get_enum_name(enum_id),
             'width': ida_enum.get_enum_width(enum_id),
+            'flag': ida_enum.get_enum_flag(enum_id),
             'members': members,
         })
 
@@ -55,8 +55,11 @@ def get_struct_info():
         members = [{'offset': offset, 'name': name, 'size': size}
                    for offset, name, size in StructMembers(struct_id)]
 
+        print(struct_name)
+        mem = ida_struct.get_member(ida_struct.get_struc(struct_id), 0)
+        print(ida_struct.get_struct_first_offset())
+
         ret.append({
-            'id': struct_id,
             'idx': struct_idx,
             'name': struct_name,
             'members': members,
@@ -77,7 +80,7 @@ def main():
     with open(fn,  'w') as out:
         json.dump(j, out, indent=2, sort_keys=True)
 
-    print('Dumped to', fn, 'at', time.ctime())
+    print('Dumped to %s at %s.' % (fn, time.ctime()))
 
 
 main()
