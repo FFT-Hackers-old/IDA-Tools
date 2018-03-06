@@ -4,9 +4,6 @@ import json
 import time
 
 
-NULL = 2 ** 64 - 1
-
-
 def load_functions(infos):
     for info in infos:
         ida_name.set_name(info['start'], info['name'])
@@ -15,7 +12,7 @@ def load_functions(infos):
 def load_enums(infos):
     for info in infos:
         enum_id = ida_enum.get_enum(info['name'])
-        if enum_id == NULL:
+        if enum_id == BADADDR:
             print('Creating new enum %s.' % info['name'])
             enum_id = ida_enum.add_enum(
                 info['idx'],
@@ -33,9 +30,12 @@ def load_enums(infos):
 
 
 def load_structs(infos):
+    insn = ida_ua.insn_t()
+
     for info in infos:
+        # Find or create struct.
         struct_id = ida_struct.get_struc_id(info['name'])
-        if struct_id == NULL:
+        if struct_id == BADADDR:
             print('Creating new struct %s.' % info['name'])
             struct_id = ida_struct.add_struc(info['idx'], info['name'])
         struct = ida_struct.get_struc(struct_id)
@@ -54,8 +54,45 @@ def load_structs(infos):
                 member['size'],
             )
 
+        # load xrefs to members of the struct
+        for xref in info['xrefs']:
+            tp = xref['type']
+
+            # offset ref
+            if tp == 1:
+                # TODO figure out what second argument does
+                op_plain_offset(xref['from'], 1, xref['offset'])
+
+            # read or write refs
+            elif tp == 2 or tp == 3:
+                ida_ua.create_insn(xref['from'], insn)
+                idc.op_stroff(insn, 1, struct.id, 0)
+
+            # TODO
+            else:
+                pass
+
+
+def load_arrays(infos):
+    for info in infos:
+        idc.make_array(info['start'], info['length'])
+
+
+def load_data(infos):
+    for info in infos:
+        ida_name.set_name(info['address'], info['name'])
+
+        # this code is kind of mashed together... not sure of the right way
+        tid = get_struc_id(info['type']) if info['type'] else BADADDR
+        if info['type']:
+            print(info['type'], hex(tid))
+            ida_bytes.create_struct(info['address'], info['sz'], tid)
+        ida_bytes.create_data(info['address'], info['flags'], info['sz'], tid)
+
 
 # we'll sometimes be passing names to IDA, which expects str, not unicode
+
+
 def convert_name_str(obj):
     for k, v in obj.items():
         if isinstance(v, unicode):
@@ -65,7 +102,7 @@ def convert_name_str(obj):
 
 
 def main():
-    fn = os.path.join(os.getcwd(), 'dump.txt')
+    fn = os.path.join(os.getcwd(), 'dump.json')
 
     with open(fn) as f:
         j = json.load(f, object_hook=convert_name_str)
@@ -73,6 +110,7 @@ def main():
     load_functions(j['functions'])
     load_enums(j['enums'])
     load_structs(j['structs'])
+    load_data(j['data'])
 
     print('Finished load from %s at %s.' % (fn, time.ctime()))
 
