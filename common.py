@@ -6,7 +6,9 @@ import ida_bytes
 import ida_enum
 import ida_nalt
 import ida_name
+import ida_offset
 import ida_struct
+import ida_typeinf
 import ida_ua
 
 import idautils
@@ -15,43 +17,67 @@ import idc
 from ida_idaapi import BADADDR
 
 
-# we'll sometimes be passing names to IDA, which expects str, not unicode
-def convert_name_str(obj):
-    for k, v in obj.items():
-        if isinstance(v, unicode):
-            obj[k] = v.encode('utf-8')
-
-    return obj
-
-
 def get_dump_file():
     return os.path.join(idautils.GetIdbDir(), 'dump.json')
 
 
+class Settings(object):
+
+    """Handles miscellaneous global settings."""
+
+    KEY = 'settings'
+
+    @staticmethod
+    def dump():
+        return {
+            'compiler': idc.get_inf_attr(idc.INF_COMPILER).id,
+        }
+
+    @staticmethod
+    def load(info):
+        idc.set_inf_attr(idc.INF_COMPILER, info['compiler'])
+
+
 class Functions(object):
+
+    """Handles names given to subroutines."""
+
     KEY = 'functions'
 
     @staticmethod
     def dump():
         ret = []
-        for i, f in enumerate(idautils.Functions()):
-            name = ida_name.get_name(f)
+        for addr in idautils.Functions():
+            name = ida_name.get_name(addr)
             if name.startswith('sub_') or name.startswith('nullsub_'):
                 continue
 
+            # For some reason, this get_type function doesn't include the name,
+            # but the SetType function expects it.
+            typ = ida_typeinf.idc_get_type(addr)
+            if typ:
+                typ = typ.replace('__cdecl', '__cdecl %s' % name) + ';'
+
             ret.append({
-                'start': f,
+                'start': addr,
                 'name': name,
+                'type': typ,
             })
         return ret
 
     @staticmethod
     def load(infos):
+        idc.set_inf_attr(idc.INF_COMPILER, 6)
         for info in infos:
             ida_name.set_name(info['start'], info['name'])
+            if info['type']:
+                idc.SetType(info['start'], info['type'])
 
 
 class Enums(object):
+
+    """Handles enum definitions."""
+
     KEY = 'enums'
 
     @staticmethod
@@ -106,6 +132,9 @@ class Enums(object):
 
 
 class Structs(object):
+
+    """Handles struct definitions and uses of members as offsets to memory accesses."""
+
     KEY = 'structs'
 
     @staticmethod
@@ -118,22 +147,17 @@ class Structs(object):
             members = [{'offset': offset, 'name': name, 'size': size}
                        for offset, name, size in idautils.StructMembers(struct_id)]
 
-            # find all xrefs to any members of this struct
+            # Find all xrefs to any members of this struct.
             xrefs = []
             for offset, name, size in idautils.StructMembers(struct_id):
                 member = ida_struct.get_member_by_name(struct, name)
                 for xref in idautils.XrefsTo(member.id):
-                    # if xref.frm in (0x88a8324, 0x8887c28):
-                    #     print('-', xref.frm)
-                    #     for k, v in xref.__dict__.items():
-                    #         print(k, v)
-
                     d = {
                         'from': xref.frm,
                         'type': xref.type,
                     }
 
-                    # offset type
+                    # Get offset base if it's an offset xref.
                     if xref.type == 1:
                         d['offset'] = ida_offset.get_offbase(xref.frm, 1)
 
@@ -162,6 +186,7 @@ class Structs(object):
 
             ida_struct.set_struc_idx(struct, info['idx'])
 
+            # Create struct members.
             for member in info['members']:
                 ida_struct.add_struc_member(
                     struct,
@@ -175,21 +200,21 @@ class Structs(object):
                     member['size'],
                 )
 
-            # load xrefs to members of the struct
+            # Create xrefs to members of the struct as offsets.
             for xref in info['xrefs']:
-                tp = xref['type']
+                typ = xref['type']
 
-                # offset ref
-                if tp == 1:
-                    # TODO figure out what second argument does
+                # Offset xref.
+                if typ == 1:
+                    # TODO figure out what second argument does.
                     idc.op_plain_offset(xref['from'], 1, xref['offset'])
 
-                # read or write refs
-                elif tp == 2 or tp == 3:
+                # Read/write xrefs.
+                elif typ in [2, 3]:
                     ida_ua.create_insn(xref['from'], insn)
                     idc.op_stroff(insn, 1, struct.id, 0)
 
-                # TODO
+                # TODO do the other cases come up?
                 else:
                     pass
 
@@ -208,17 +233,23 @@ class Arrays(object):
 
 
 class Data(object):
+
+    """Handles struct/array definitions and labels in memory."""
+
     KEY = 'data'
 
     @staticmethod
     def dump():
         ret = []
         for addr, name in idautils.Names():
-            # if any(name.startswith(s) for s in ['byte_', 'word_', 'dword_', 'unk_', 'jpt_']):
-            #     continue
-
             flags = ida_bytes.get_flags(addr)
             if ida_bytes.has_dummy_name(flags) or ida_bytes.has_auto_name(flags) or not ida_bytes.is_data(flags):
+                print('skip auto:', name)
+                continue
+
+            # Sometimes the auto-generated names don't actually usually have the
+            # right flags set, so skip these auto-looking names.
+            if any(name.startswith(s) for s in ['byte_', 'word_', 'dword_', 'unk_', 'jpt_']):
                 continue
 
             # print('%08x' % addr, '%08x' % flags, name,
@@ -250,7 +281,8 @@ class Data(object):
         for info in infos:
             ida_name.set_name(info['address'], info['name'])
 
-            # this code is kind of mashed together... not sure of the right way
+            # TODO this code is kind of mashed together... not sure of the
+            # right way.
             tid = ida_struct.get_struc_id(
                 info['type']) if info['type'] else BADADDR
             if info['type']:
@@ -260,4 +292,4 @@ class Data(object):
                 info['address'], info['flags'], info['sz'], tid)
 
 
-items = [Functions, Enums, Structs, Arrays, Data]
+items = [Settings, Enums, Structs, Arrays, Data, Functions]

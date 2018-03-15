@@ -5,8 +5,17 @@ import time
 
 import common
 
-# running the script multiple times within IDA doesn't reload imported modules
+# Running the script multiple times within IDA doesn't reload imported modules.
 reload(common)
+
+
+# We'll sometimes be passing names to IDA, which expects str, not unicode.
+def convert_name_str(obj):
+    for k, v in obj.items():
+        if isinstance(v, unicode):
+            obj[k] = v.encode('utf-8')
+
+    return obj
 
 
 def main():
