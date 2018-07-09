@@ -1,9 +1,11 @@
 from __future__ import print_function
 
 import os
+import json
 
 import ida_bytes
 import ida_enum
+import ida_kernwin
 import ida_nalt
 import ida_name
 import ida_offset
@@ -16,10 +18,12 @@ import idc
 
 from ida_idaapi import BADADDR
 
-
-def get_dump_file():
-    return os.path.join(idautils.GetIdbDir(), 'dump.json')
-
+def filter_none(dict):
+	newDict = {}
+	for k in dict:
+		if dict[k] != None:
+			newDict[k] = dict[k]
+	return newDict
 
 class Settings(object):
 
@@ -58,21 +62,21 @@ class Functions(object):
             if typ:
                 typ = typ.replace('__cdecl', '__cdecl %s' % name) + ';'
 
-            ret.append({
+            ret.append(filter_none({
                 'start': addr,
                 'name': name,
                 'type': typ,
-            })
+            }))
         return ret
 
     @staticmethod
     def load(infos):
         idc.set_inf_attr(idc.INF_COMPILER, 6)
         for info in infos:
+            type = info.get('type', None)
             ida_name.set_name(info['start'], info['name'])
-            if info['type']:
-                idc.SetType(info['start'], info['type'])
-
+            if type:
+                idc.SetType(info['start'], type)
 
 class Enums(object):
 
@@ -114,7 +118,7 @@ class Enums(object):
         for info in infos:
             enum_id = ida_enum.get_enum(info['name'])
             if enum_id == BADADDR:
-                print('Creating new enum %s.' % info['name'])
+                print('[IDA-Sync] Creating new enum %s.' % info['name'])
                 enum_id = ida_enum.add_enum(
                     info['idx'],
                     info['name'],
@@ -180,7 +184,7 @@ class Structs(object):
             # Find or create struct.
             struct_id = ida_struct.get_struc_id(info['name'])
             if struct_id == BADADDR:
-                print('Creating new struct %s.' % info['name'])
+                print('[IDA-Sync] Creating new struct %s.' % info['name'])
                 struct_id = ida_struct.add_struc(info['idx'], info['name'])
             struct = ida_struct.get_struc(struct_id)
 
@@ -243,8 +247,9 @@ class Data(object):
         ret = []
         for addr, name in idautils.Names():
             flags = ida_bytes.get_flags(addr)
-            if ida_bytes.has_dummy_name(flags) or ida_bytes.has_auto_name(flags) or not ida_bytes.is_data(flags):
-                print('skip auto:', name)
+            # The 'a' heuristic is fairly bad but we need to filter out IDA's default
+            # naming for strings
+            if ida_bytes.has_dummy_name(flags) or ida_bytes.has_auto_name(flags) or not ida_bytes.is_data(flags) or name[0] == 'a':
                 continue
 
             # Sometimes the auto-generated names don't actually usually have the
@@ -252,27 +257,22 @@ class Data(object):
             if any(name.startswith(s) for s in ['byte_', 'word_', 'dword_', 'unk_', 'jpt_']):
                 continue
 
-            # print('%08x' % addr, '%08x' % flags, name,
-            # ida_bytes.is_data(flags))
-
             sz = ida_bytes.get_item_size(addr)
 
             if ida_bytes.is_struct(flags):
                 ti = ida_nalt.opinfo_t()
                 ida_bytes.get_opinfo(ti, addr, 0, flags)
-                # itemsize = ida_bytes.get_data_elsize(addr, flags, ti)
                 typ = ida_struct.get_struc_name(ti.tid)
             else:
-                # itemsize = ida_bytes.get_item_size(addr)
                 typ = None
-
-            ret.append({
+			
+            ret.append(filter_none({
                 'address': addr,
                 'name': name,
                 'type': typ,
                 'sz': sz,
                 'flags': flags,
-            })
+            }))
 
         return ret
 
@@ -280,16 +280,91 @@ class Data(object):
     def load(infos):
         for info in infos:
             ida_name.set_name(info['address'], info['name'])
+            type = info.get('type', None)
 
             # TODO this code is kind of mashed together... not sure of the
             # right way.
-            tid = ida_struct.get_struc_id(
-                info['type']) if info['type'] else BADADDR
-            if info['type']:
-                print(info['type'], hex(tid))
+            tid = ida_struct.get_struc_id(type) if type else BADADDR
+            if type:
                 ida_bytes.create_struct(info['address'], info['sz'], tid)
             ida_bytes.create_data(
                 info['address'], info['flags'], info['sz'], tid)
 
 
 items = [Settings, Enums, Structs, Arrays, Data, Functions]
+
+# We'll sometimes be passing names to IDA, which expects str, not unicode.
+def convert_name_str(obj):
+    for k, v in obj.items():
+        if isinstance(v, unicode):
+            obj[k] = v.encode('utf-8')
+    return obj
+
+class ImportHandler(ida_kernwin.action_handler_t):
+	def activate(self, ctx):
+		filename = ida_kernwin.ask_file(False, '*.json', 'Import IDA-Sync JSON file')
+		if filename is not None:
+			print('[IDA-Sync] Importing %s...' % filename)
+			with open(filename) as f:
+				j = json.load(f, object_hook=convert_name_str)
+			for item in items:
+				item.load(j.get(item.KEY, []))
+			print('[IDA-Sync] Done')
+		return 1
+
+	def update(self, ctx):
+		return ida_kernwin.AST_ENABLE_ALWAYS
+
+class ExportHandler(ida_kernwin.action_handler_t):
+	def activate(self, ctx):
+		filename = ida_kernwin.ask_file(True, '*.json', 'Export IDA-Sync JSON file')
+		if filename is not None:
+			print('[IDA-Sync] Exporting %s...' % filename)
+			j = {item.KEY: item.dump() for item in items}
+			with open(filename, 'w') as file:
+				json.dump(j, file, indent=2, sort_keys=True, separators=(',', ': '))
+			print('[IDA-Sync] Done')
+		return 1
+
+	def update(self, ctx):
+		return ida_kernwin.AST_ENABLE_ALWAYS
+
+class IDASyncPlugin(ida_idaapi.plugin_t):
+	flags = ida_idaapi.PLUGIN_UNL
+	comment = "JSON workspaces for IDA"
+	help = "Import/export JSON workspaces"
+	wanted_name = "IDA-Sync"
+	wanted_hotkey = ''
+
+	def init(self):
+		import_action = ida_kernwin.action_desc_t(
+			'idasync:import',
+			'IDA-Sync JSON file...',
+			ImportHandler())
+		export_action = ida_kernwin.action_desc_t(
+			'idasync:export',
+			'Create IDA-Sync JSON file...',
+			ExportHandler())
+		ida_kernwin.register_action(import_action)
+		ida_kernwin.register_action(export_action)
+		ida_kernwin.attach_action_to_menu(
+			'File/Load file/Parse C header file...',
+			'idasync:import',
+			ida_kernwin.SETMENU_APP
+		)
+		ida_kernwin.attach_action_to_menu(
+			'File/Produce file/Create C header file...',
+			'idasync:export',
+			ida_kernwin.SETMENU_APP
+		)
+		print("[IDA-Sync] Loaded")
+		return ida_idaapi.PLUGIN_OK
+
+	def run(self, arg):
+		pass
+
+	def term(self):
+		pass
+
+def PLUGIN_ENTRY():
+	return IDASyncPlugin()
