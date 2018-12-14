@@ -155,17 +155,18 @@ class Structs(object):
             xrefs = []
             for offset, name, size in idautils.StructMembers(struct_id):
                 member = ida_struct.get_member_by_name(struct, name)
-                for xref in idautils.XrefsTo(member.id):
-                    d = {
-                        'from': xref.frm,
-                        'type': xref.type,
-                    }
+                if member is not None:
+                    for xref in idautils.XrefsTo(member.id):
+                        d = {
+                            'from': xref.frm,
+                            'type': xref.type,
+                        }
 
-                    # Get offset base if it's an offset xref.
-                    if xref.type == 1:
-                        d['offset'] = ida_offset.get_offbase(xref.frm, 1)
+                        # Get offset base if it's an offset xref.
+                        if xref.type == 1:
+                            d['offset'] = ida_offset.get_offbase(xref.frm, 1)
 
-                    xrefs.append(d)
+                        xrefs.append(d)
 
             ret.append({
                 'idx': struct_idx,
